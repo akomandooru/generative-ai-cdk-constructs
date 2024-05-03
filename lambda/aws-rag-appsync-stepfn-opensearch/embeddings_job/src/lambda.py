@@ -114,27 +114,35 @@ def process_documents_in_aoss(index_exists, shards, http_auth,model_id):
    
     shard_start_index = 0
     if index_exists is False:
-        OpenSearchVectorSearch.from_documents(
-            shards[0],
-            embeddings,
-            opensearch_url=opensearch_domain,
-            http_auth=http_auth,
-            timeout=300,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            index_name=opensearch_index,
-            engine="faiss",
-        )
+        try:
+            OpenSearchVectorSearch.from_documents(
+                shards[0],
+                embeddings,
+                opensearch_url=opensearch_domain,
+                http_auth=http_auth,
+                timeout=300,
+                use_ssl=True,
+                verify_certs=True,
+                connection_class=RequestsHttpConnection,
+                index_name=opensearch_index,
+                engine="faiss",
+            )
+        except Exception as e:
+            print(f"error creating index {opensearch_index} :: {e}")
+            raise e
         # we now need to start the loop below for the second shard
         shard_start_index = 1
     for shard in shards[shard_start_index:]:
         print(f'processing shard index {shard_start_index}')
-        results = process_shard(shard=shard,
-                    os_index_name=opensearch_index,
-                    os_domain_ep=opensearch_domain,
-                    os_http_auth=http_auth,
-                    model_id=model_id)
+        try:
+            results = process_shard(shard=shard,
+                        os_index_name=opensearch_index,
+                        os_domain_ep=opensearch_domain,
+                        os_http_auth=http_auth,
+                        model_id=model_id)
+        except Exception as e:
+            print(f"error processing shard {shard_start_index} :: {e}")
+            raise e
         
 
 @logger.inject_lambda_context(log_event=True)
@@ -262,19 +270,32 @@ def process_text_embeddings(docs,modelid,http_auth,files,job_id):
 
 def process_image_embeddings(docs,modelid,http_auth,files,job_id,url):
     logger.info("process image embeddings")
-    print(f' docs :: {docs}')
-    
-    for doc in docs:
-        doc.metadata['timestamp'] = time.time()
-        doc.metadata['embeddings_model'] = modelid
-    # not using text splitter , using whole image embedding as one array
-    shards = np.array_split(docs,1)
-
     try:
+        for doc in docs:
+            doc.metadata['timestamp'] = time.time()
+            doc.metadata['embeddings_model'] = modelid
+        # not using text splitter , using whole image embedding as one array
+        shards = np.array_split(docs,1)
+
         index_exists = check_if_index_exists(opensearch_index,
-                                                aws_region,
-                                                opensearch_domain,
-                                                http_auth)
+                                                    aws_region,
+                                                    opensearch_domain,
+                                                    http_auth)
+        if opensearch_api_name == "es":
+            process_documents_in_es(index_exists, shards, http_auth,modelid)
+        elif opensearch_api_name == "aoss":
+            process_documents_in_aoss(index_exists, shards, http_auth,modelid)
+
+        for file in files:
+            if  file['status'] == 'File transformed':
+                file['status'] = 'Ingested'
+                file['imageurl'] = url
+            else:
+                file['status'] = 'Error_'+file['status']
+        updateIngestionJobStatus({'jobid': job_id, 'files': files})
+        return {
+            'status':'succeed'
+        }
     except Exception as e:
         logger.exception(f'Failed to verify the existence of the os index : {e}')
         for file in files:
@@ -284,19 +305,4 @@ def process_image_embeddings(docs,modelid,http_auth,files,job_id,url):
             'status':'failed'
         }
     
-    if opensearch_api_name == "es":
-            process_documents_in_es(index_exists, shards, http_auth,modelid)
-    elif opensearch_api_name == "aoss":
-            process_documents_in_aoss(index_exists, shards, http_auth,modelid)
-
-    for file in files:
-        if file['status'] == 'File transformed':
-           file['status'] = 'Ingested'
-           file['imageurl'] = url
-        else:
-            file['status'] = 'Error_'+file['status']
-    updateIngestionJobStatus({'jobid': job_id, 'files': files})
-
-    return {
-        'status':'succeed'
-    }
+    
